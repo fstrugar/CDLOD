@@ -1,0 +1,24 @@
+
+ [x] napraviti da se moze izabrati TBMP za heightmapu i overlay mapu
+ 
+   [x] bazicna funkcionalnost (klik na browse otvara dialog, ako korisnik izabere fajl ime se snimi u edit box)
+ 
+   [x] provera tiledbitmap parametara (format, rezolucija)
+     [x] ubaciti klasu TiledBitmap (dovoljno ce biti samo .dll) tako da mogu da se otvore fajlovi
+     [x] proveriti da je format za heightmap korektan (16bit grayscale)
+     [x] proveriti da je format za overlay map korektan (24bit RGB)
+     [x] mislim da rezolucija overlay mape mora biti deljiva sa rezolucijom heightmape (proveriti)
+ 
+ [x] kreiranje svih inicijalnih parametara baziranih na heightmap width & height
+ 
+ [x] snimanje/ucitavanje svih trenutnih setinga u xml fajl
+ 
+ [x] validacija parametara (on go button - only maps format and resolution)
+ 
+ [x] kreiranje normal mape
+ 
+ [-] kreiranje .ini fajla i poziv DLOD_01_Streaming.exe-a i prikazivanje output-a 
+ 
+ [ ] stats - richtextbox
+ 
+ [ ] konverzija ostalih image tipova u .tbmp 

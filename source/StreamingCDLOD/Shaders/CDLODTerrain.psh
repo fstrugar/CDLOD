@@ -1,0 +1,197 @@
+//////////////////////////////////////////////////////////////////////
+// Copyright (C) 2009 - Filip Strugar.
+// Distributed under the zlib License (see readme file)
+//////////////////////////////////////////////////////////////////////
+
+#define PIXEL_SHADER
+
+#include "common.sh"
+
+#include "lightingShared.sh"
+
+#if defined( TEXTURING_MODE_SPLATTING )
+#include "splatting.sh"
+#endif
+
+struct DeferredOutputPixel
+{
+   float4   Albedo   : COLOR0;
+   float4   Normal   : COLOR1;
+   float4   Depth    : COLOR2;
+};
+
+sampler        g_normalmapTexture;
+sampler        g_normalmapParentTexture;
+float4         g_gridToNMConsts;
+float4         g_gridToNMParentConsts;    // for sampling Lower Lod Level morph-to texture
+
+sampler        g_overlaymapTexture;
+sampler        g_overlaymapParentTexture;
+float4         g_gridToOMConsts;
+float4         g_gridToOMParentConsts;    // for sampling Lower Lod Level morph-to texture
+
+float3         g_cameraPos;
+float4         g_ambientLightColor;
+float4         g_directionalLightDir;
+float4         g_directionalLightColor;
+
+float4         g_fogColor;
+float4         g_fogConsts;
+
+#if USE_DETAIL_HEIGHTMAP
+sampler        g_terrainDetailNMTexture;
+#endif
+
+sampler        g_noiseTexture;
+float4         g_colorMult;
+
+
+// calc texture coords used to sample heightmap texture
+void calcNormalmapUV( float2 gridPos, out float2 outNormalmapUV, out float2 outParentNormalmapUV )
+{
+   outNormalmapUV       = gridPos.xy * g_gridToNMConsts.xy + g_gridToNMConsts.zw;
+   outParentNormalmapUV = gridPos.xy * g_gridToNMParentConsts.xy + g_gridToNMParentConsts.zw;
+}
+
+// calc texture coords used to sample overlay texture
+void calcOverlaymapUV( float2 gridPos, out float2 outOverlaymapUV, out float2 outParentOverlaymapUV )
+{
+   outOverlaymapUV         = gridPos.xy * g_gridToOMConsts.xy + g_gridToOMConsts.zw;
+   outParentOverlaymapUV   = gridPos.xy * g_gridToOMParentConsts.xy + g_gridToOMParentConsts.zw;
+}
+
+void DoDLODTerrainResponse( TerrainVertexOutput input, out float3 outAlbedoColor, out float3 outWorldNormal,
+                           out float outSpecPow, out float outSpecMul)
+{
+   float LODMorphValue = input.vertexConsts.x;
+
+   // sample normal map
+   #if LIGHTING_ENABLED
+   float4 normalColor = float4( 0, 0, 0, 0 );
+   {
+      float2 normalmapUV, parentNormalmapUV;
+      calcNormalmapUV( input.meshGridPos_detUV.xy, normalmapUV, parentNormalmapUV );
+
+      normalColor = tex2D( g_normalmapTexture, normalmapUV ).xyzw;
+      float4 parentNormalColor = tex2D( g_normalmapParentTexture, parentNormalmapUV ).xyzw;
+      normalColor = lerp( normalColor, parentNormalColor, LODMorphValue );
+   }
+   #endif
+
+   // sample overlay image map
+   float4 albedoColor;
+
+   #if defined( TEXTURING_MODE_SIMPLE )
+   {
+      albedoColor = float4( 1.0, 1.0, 1.0, 1.0 );
+      outSpecPow = 32.0f;
+      outSpecMul = 0.0f;
+   }
+   #elif defined( TEXTURING_MODE_IMAGEOVERLAY ) || defined( TEXTURING_MODE_SPLATTING )
+   {
+      float2 overlaymapUV, parentOverlaymapUV; 
+      calcOverlaymapUV( input.meshGridPos_detUV.xy, overlaymapUV, parentOverlaymapUV );
+
+      albedoColor = tex2D( g_overlaymapTexture, overlaymapUV ).xyzw;
+      float4 parentAlbedoColor = tex2D( g_overlaymapParentTexture, parentOverlaymapUV ).xyzw;
+      albedoColor = lerp( albedoColor, parentAlbedoColor, LODMorphValue );
+      outSpecPow = 32.0f;
+      outSpecMul = 0.0f;
+   }
+   #else
+      #error Texturing mode not defined
+   #endif   
+
+   #if LIGHTING_ENABLED
+   float3 worldNormal = UncompressDXT5_NM(normalColor.xyzw); //normalize( normalColor.xyz * float3( 2.0, 2.0, 2.0 ) - float3( 1.0, 1.0, 1.0 ) );
+   #else
+   float3 worldNormal = float3( 0, 0, 1 );
+   #endif
+
+   // detailmap
+   #if LIGHTING_ENABLED && USE_DETAIL_HEIGHTMAP
+   {
+      float2 detailmapUV = input.meshGridPos_detUV.zw;
+      float detailmapFadeout = input.vertexConsts.y;
+
+      float3 detNormal = tex2D( g_terrainDetailNMTexture, detailmapUV ).xyz;
+      detNormal.xy = detNormal.xy * float2( 2.0, 2.0 ) - float2( 1.0, 1.0 );
+      worldNormal.xy += detNormal.xy * detailmapFadeout;
+      worldNormal.z = sqrt( 1 - worldNormal.x * worldNormal.x - worldNormal.y * worldNormal.y );
+   }
+   #endif
+
+   #if defined( TEXTURING_MODE_SPLATTING )
+   {
+      ApplySplatting( input.meshGridPos_detUV.xy, albedoColor, worldNormal, albedoColor.xyz, worldNormal,
+                        outSpecPow, outSpecMul);
+   }
+   #endif
+
+   albedoColor.a = 1.0;
+   outAlbedoColor = albedoColor.xyz;
+   outWorldNormal = worldNormal;
+}
+
+
+float4 forwardBasic( TerrainVertexOutput input ) : COLOR
+{
+   float3 albedoColor;
+   float3 worldNormal;
+   float specMul, specPow;
+   
+   DoDLODTerrainResponse( input, albedoColor, worldNormal, specMul, specPow );
+
+   float3 color = albedoColor * g_ambientLightColor.xyz;
+
+   float3 worldPos = input.worldPos.xyz;
+
+   float3 worldEyeDir   = normalize( worldPos - g_cameraPos.xyz );
+   
+   #if LIGHTING_ENABLED 
+      float dirLightStrength = CalculateDirectionalLight( worldNormal, g_directionalLightDir.xyz, worldEyeDir, specMul, specPow );
+      color += albedoColor * dirLightStrength * g_directionalLightColor.xyz;
+   #else
+      color += albedoColor;
+   #endif
+
+   const float distanceToCamera = input.vertexConsts.w;
+ 	float fogStrength = saturate(distanceToCamera * g_fogConsts.y + g_fogConsts.x);
+   color.xyz = lerp( g_fogColor.xyz, color.xyz, fogStrength );
+   //color.xyz = sin( distanceToCamera * 0.1 );
+
+   return float4( color.xyz, 1.0 );
+}
+
+
+DeferredOutputPixel deferredStandard( TerrainVertexOutput input )
+{
+   float3 albedoColor;
+   float3 worldNormal;
+   float specMul, specPow;
+   
+   DoDLODTerrainResponse( input, albedoColor, worldNormal, specMul, specPow );
+
+   float depth = input.vertexConsts.z;
+
+   DeferredOutputPixel output;
+
+   output.Albedo  = float4( albedoColor, 1.0 );
+   output.Normal  = float4( worldNormal * float3( 0.5, 0.5, 0.5 ) + float3( 0.5, 0.5, 0.5 ), 1.0 );
+   output.Depth   = float4( depth, 0.0, 0.0, 0.0 );
+ 
+   return output;    
+}
+
+
+float4 forwardWireframe( TerrainVertexOutput input ) : COLOR
+{
+   float3 color = float3( 0, 0, 0 );
+
+   const float distanceToCamera = input.vertexConsts.w;
+ 	float fogStrength = saturate(distanceToCamera * g_fogConsts.y + g_fogConsts.x);
+   color.xyz = lerp( g_fogColor.xyz, color.xyz, fogStrength );
+
+   return float4( color.rgb, 1 );
+}
+

@@ -1,0 +1,288 @@
+//////////////////////////////////////////////////////////////////////
+// Copyright (C) 2009 - Filip Strugar.
+// Distributed under the zlib License (see readme.txt)
+//////////////////////////////////////////////////////////////////////
+
+#define PIXEL_SHADER
+
+#include "common.sh"
+//#if USE_SHADOWMAP
+//#include "shadows.sh"
+//#endif
+
+sampler           g_terrainNMTexture;
+
+#if USE_DETAIL_HEIGHTMAP
+sampler           g_terrainDetailNMTexture;
+#endif
+
+#if USE_SHADOWMAP
+sampler           g_shadowMapTexture;
+sampler           g_shadowL2MapTexture;
+float4            g_shadowMapConsts;      // .x = shadow map texture resolution, .y = L1 radius, .z = L2 radius
+#endif
+
+sampler           g_noiseTexture;
+float4            g_colorMult;
+
+float CalcShadow( const sampler shadowMapTexture, const sampler shadow2MapTexture, 
+                                  const float2 shadowMapResolution, const float3 shadowTexelPos, const float3 shadow2TexelPos, 
+                                  const float2 noiseUV, const float2 radius, const float2 radius2, float morphValue );
+
+float CalcShadow2( const sampler shadowMapTexture, const sampler shadow2MapTexture, 
+                                  const float2 shadowMapResolution, const float3 shadowTexelPos, const float3 shadow2TexelPos, 
+                                  const float2 noiseUV, const float2 radius, const float2 radius2, float morphValue );
+
+
+float4 CalculateLighting( TerrainVertexOutput input, float2 screenPos )
+{
+   float3 normal = tex2D( g_terrainNMTexture, input.globalUV_detUV.xy );
+   normal.xy = normal.xy * float2( 2.0, 2.0 ) - float2( 1.0, 1.0 );
+   
+#if USE_DETAIL_HEIGHTMAP
+   //float detailMorphK = input.morphInfo.y;
+   float3 detNormal = tex2D( g_terrainDetailNMTexture, input.globalUV_detUV.zw );
+   detNormal.xy = detNormal.xy * float2( 2.0, 2.0 ) - float2( 1.0, 1.0 );
+   normal.xy += 
+      detNormal.xy;
+#endif
+   
+   normal.z = sqrt( 1 - normal.x * normal.x - normal.y * normal.y );
+
+   float directionalLight = CalculateDirectionalLight( normal, normalize( input.lightDir.xyz ), normalize( input.eyeDir.xyz ), 16.0, 0.0 );
+
+#if USE_SHADOWMAP
+
+   float noiseValue = tex2Dbias( g_noiseTexture, float4( input.shadowNoise.xy, 0, -0.5 ) ).a;
+
+   float shadowStrength = 0.9f;
+
+   {
+      float3 posLight = input.shadowPosition.xyz / input.shadowPosition.www;
+      float3 posL2Light = input.shadowL2Position.xyz / input.shadowL2Position.www;
+
+      //posLight.z = lerp( posLight.z, input.shadowNoise.z / input.shadowNoise.w, noiseValue );
+
+      float2 smRadius = float2( g_shadowMapConsts.y, g_shadowMapConsts.y );
+      float2 smL2Radius = float2( g_shadowMapConsts.z, g_shadowMapConsts.z );
+
+      float lightAmount = CalcShadow( g_shadowMapTexture, g_shadowL2MapTexture, g_shadowMapConsts.xx, posLight.xyz, 
+                                                         posL2Light.xyz, input.shadowNoise.xy, smRadius, smL2Radius, input.morphInfo.x  );
+
+      directionalLight *= shadowStrength * lightAmount + (1.0 - shadowStrength);
+
+      //debug: high contrast shadows
+      //directionalLight = lightAmount * 0.7 + directionalLight * 0.3; // extremely high contrast shadows for testing...
+   }
+
+#endif
+   
+   float4 color = float4( g_lightColorAmbient.xyz + g_lightColorDiffuse.xyz * directionalLight, 1.0 );
+
+   color *= g_colorMult;
+
+   return color;
+
+}
+
+float4 flatShading( TerrainVertexOutput input, float2 screenPos : VPOS ) : COLOR
+{
+   float4 color = CalculateLighting( input, screenPos );
+ 
+   return color;    
+}
+
+
+
+float CalcShadow( const sampler shadowMapTexture, const sampler shadow2MapTexture, 
+                                  const float2 shadowMapResolution, const float3 shadowTexelPos, const float3 shadow2TexelPos, 
+                                  const float2 noiseUV, const float2 radius, const float2 radius2, float morphValue )
+{
+   float2 shadowMapTexelSize = float2( 1.0, 1.0 ) / shadowMapResolution;
+   float4 noiseA = tex2Dbias( g_noiseTexture, float4( noiseUV, 0, -0.4 ) );
+   float4 noiseB = tex2Dbias( g_noiseTexture, float4( noiseUV * 0.8 + float2( 0.51, 0.49 ), 0, -0.2 ) );
+   morphValue += min( morphValue, 1.0 - morphValue ) * (noiseA.x * 1.0 - 0.5);
+
+
+
+   float cSampleAccum = 0.0f;
+
+#if SHADOWMAP_HIGHQUALITY
+
+   ////////////////////////////////////////////////////////////////////////////
+
+
+   const int loopIterations = 13;
+
+   float2 vTaps[loopIterations] = { 
+                        float2(noiseA.z, noiseA.w),   float2(-noiseA.z, noiseA.w),
+                        float2(noiseA.z, -noiseA.w),   float2(-noiseA.z, -noiseA.w),
+                        float2(noiseB.z, noiseB.w),   float2(-noiseB.z, noiseB.w),
+                        float2(noiseB.z, -noiseB.w),   float2(-noiseB.z, -noiseB.w),
+                        float2(0, 0),
+                        float2(noiseA.y, noiseB.y), float2(-noiseA.y, noiseB.y),
+                        float2(noiseA.y, -noiseB.y), float2(-noiseA.y, -noiseB.y),
+                        };
+   
+   float2 offsetL1 = (noiseA.xy - 0.5) * (radius * 0.5);
+   float2 offsetL2 = (noiseA.xy - 0.5) * (radius2 * 0.5);
+
+#else
+
+   const int loopIterations = 4;
+
+   float2 vTaps[loopIterations] = { 
+                        float2(noiseA.z, noiseA.w),   float2(-noiseA.z, noiseA.w),
+                        float2(noiseB.z, -noiseB.w),   float2(-noiseB.z, -noiseB.w) };
+
+   float2 offsetL1 = 0.0f;
+   float2 offsetL2 = 0.0f;
+
+#endif
+
+#if USE_NVIDIA_SHADOWS
+
+   for ( int nTapIndex = 0; nTapIndex < loopIterations; nTapIndex ++ )
+   {
+      float2 vTapCoord2 = shadow2TexelPos.xy + shadowMapTexelSize * (offsetL2 + vTaps[nTapIndex] * radius2);
+      float2 vTapCoord1 = shadowTexelPos.xy + shadowMapTexelSize * (offsetL1 + vTaps[nTapIndex] * radius);
+      if( morphValue*loopIterations > nTapIndex+0.5 )
+      {
+         cSampleAccum += tex2Dlod( shadow2MapTexture, float4( vTapCoord2, shadow2TexelPos.z, 0.0 ) );
+      }
+      else
+      {
+         cSampleAccum += tex2Dlod( shadowMapTexture, float4( vTapCoord1, shadowTexelPos.z, 0.0 ) );
+      }
+   }
+   return cSampleAccum / (float)loopIterations; // Return average
+
+#else
+
+   for ( int nTapIndex = 0; nTapIndex < loopIterations; nTapIndex ++ )
+   {
+      float2 vTapCoord2 = shadow2TexelPos.xy + shadowMapTexelSize * (offsetL2 + vTaps[nTapIndex] * radius2);
+      float2 vTapCoord1 = shadowTexelPos.xy + shadowMapTexelSize * (offsetL1 + vTaps[nTapIndex] * radius);
+      if( morphValue*loopIterations > nTapIndex+0.5 )
+      {
+         float4 samples = tex2D( shadow2MapTexture, vTapCoord2 );
+         cSampleAccum += dot( (samples > shadow2TexelPos.zzzz), float4( 1, 1, 1, 1 ) );
+      }
+      else
+      {
+         float4 samples = tex2D( shadowMapTexture, vTapCoord1 );
+         cSampleAccum += dot( (samples > shadowTexelPos.zzzz), float4( 1, 1, 1, 1 ) );
+      }
+   }
+   return cSampleAccum / ((float)loopIterations * 4.0); // Return average
+
+#endif
+
+   ///////////////////////////////////////////////////////////////////////////
+
+}
+
+float CalcShadow2( const sampler shadow1MapTexture, const sampler shadow2MapTexture, 
+                                  const float2 shadowMapResolution, const float3 shadow1TexelPos, const float3 shadow2TexelPos, 
+                                  const float2 noiseUV, const float2 radius1, const float2 radius2, float morphValue )
+{
+   float2 shadowMapTexelSize = float2( 1.0, 1.0 ) / shadowMapResolution;
+   float4 noiseA = tex2Dbias( g_noiseTexture, float4( noiseUV, 0, -0.1 ) );
+   float4 noiseB = tex2Dbias( g_noiseTexture, float4( noiseUV * 0.6 + float2( 0.51, 0.49 ), 0, -0.1 ) );
+   morphValue += min( morphValue, 1.0 - morphValue ) * (noiseA.x * 1.0 - 0.5);
+
+
+
+   float cSampleAccum = 0.0f;
+
+#if SHADOWMAP_HIGHQUALITY
+
+   ////////////////////////////////////////////////////////////////////////////
+
+
+   const int loopIterations = 12;
+
+   // Poisson tap locations for unit disc
+   float2 vTaps[12] = { float2(-0.326212,-0.40581),   float2(-0.840144,-0.07358),
+                        float2(-0.695914,0.457137),   float2(-0.203345,0.620716),
+                        float2(0.96234,-0.194983),    float2(0.473434,-0.480026),
+                        float2(0.519456,0.767022),    float2(0.185461,-0.893124),
+                        float2(0.507431,0.064425),    float2(0.89642,0.412458),
+                        float2(-0.32194,-0.932615),   float2(-0.791559,-0.59771) };
+
+   float2 rotOffsetA = noiseA.zw * float2(2.0, 2.0) - float2(1.0, 1.0);
+   float2 rotOffsetB = noiseB.zw * float2(2.0, 2.0) - float2(1.0, 1.0);
+
+   //rotOffset = rotOffset * 0.667 + (noiseB.zw * float2(2.0, 2.0) - float2(1.0, 1.0)) * 0.333;
+
+   float2x2 rotMat = { rotOffsetA, float2( rotOffsetA.y, -rotOffsetA.x ) };
+   float2x2 rotMatB = { rotOffsetB, float2( rotOffsetB.y, -rotOffsetB.x ) };
+
+   rotMat = mul( rotMat, rotMatB );
+
+#else
+
+   const int loopIterations = 4;
+
+   float2 vTaps[loopIterations] = { 
+                        float2(noiseA.z, noiseA.w),   float2(-noiseA.z, noiseA.w),
+                        float2(noiseB.z, -noiseB.w),   float2(-noiseB.z, -noiseB.w) };
+
+   float2x2 rotMat = { float2( 1, 0 ), float2( 0, 1 ) };
+
+#endif
+
+
+#if USE_NVIDIA_SHADOWS
+
+   for ( int nTapIndex = 0; nTapIndex < loopIterations; nTapIndex ++ )
+   {
+      //float2 rotatedOffset = float2( dot( vTaps[nTapIndex], rotMultX ), dot( vTaps[nTapIndex], rotMultY ) );
+      float2 rotatedOffset = mul( rotMat, vTaps[nTapIndex] );
+      float2 vTapCoord1 = vTaps[nTapIndex];
+      float2 vTapCoord2 = vTaps[nTapIndex];
+      
+      vTapCoord1 = shadow1TexelPos.xy + shadowMapTexelSize * rotatedOffset * radius1;
+      vTapCoord2 = shadow2TexelPos.xy + shadowMapTexelSize * rotatedOffset * radius2;
+
+
+      if( morphValue*loopIterations < nTapIndex+0.5 )
+      {
+         cSampleAccum += tex2Dlod( shadow1MapTexture, float4( vTapCoord1, shadow1TexelPos.z, 0.0 ) );
+      }
+      else
+      {
+         cSampleAccum += tex2Dlod( shadow2MapTexture, float4( vTapCoord2, shadow2TexelPos.z, 0.0 ) );
+      }
+   }
+   return cSampleAccum / (float)loopIterations; // Return average
+
+#else
+
+   for ( int nTapIndex = 0; nTapIndex < loopIterations; nTapIndex ++ )
+   {
+      float2 rotatedOffset = mul( rotMat, vTaps[nTapIndex] );
+      float2 vTapCoord1 = vTaps[nTapIndex];
+      float2 vTapCoord2 = vTaps[nTapIndex];
+      
+      vTapCoord1 = shadow1TexelPos.xy + shadowMapTexelSize * rotatedOffset * radius1;
+      vTapCoord2 = shadow2TexelPos.xy + shadowMapTexelSize * rotatedOffset * radius2;
+
+      if( morphValue*loopIterations > nTapIndex+0.5 )
+      {
+         float4 samples = tex2D( shadow2MapTexture, vTapCoord2 );
+         cSampleAccum += dot( (samples > shadow2TexelPos.zzzz), float4( 1, 1, 1, 1 ) );
+      }
+      else
+      {
+         float4 samples = tex2D( shadow1MapTexture, vTapCoord1 );
+         cSampleAccum += dot( (samples > shadow1TexelPos.zzzz), float4( 1, 1, 1, 1 ) );
+      }
+   }
+   return cSampleAccum / ((float)loopIterations * 4.0); // Return average
+
+#endif
+
+   ///////////////////////////////////////////////////////////////////////////
+
+}

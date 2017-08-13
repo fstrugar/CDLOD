@@ -1,0 +1,27 @@
+//////////////////////////////////////////////////////////////////////
+// Copyright (C) 2009 - Filip Strugar.
+// Distributed under the zlib License (see readme.txt)
+//////////////////////////////////////////////////////////////////////
+
+#define PIXEL_SHADER
+
+#include "common.sh"
+
+float4   g_justOutputColorValue;
+sampler  g_justCopySourceTexture;
+
+float4 justOutputColor( FixedVertexOutput input ) : COLOR
+{
+   return g_justOutputColorValue;
+}
+
+float4 justCopy( FixedVertexOutput input ) : COLOR
+{
+   return sin( tex2D( g_justCopySourceTexture, input.tex0 ).x * 1000 );
+}
+
+float4 writeShadow( float2 depth : TEXCOORD0 ) : COLOR
+{
+   float outDepth = depth.x / depth.y;
+   return float4( outDepth.xxx, 1.0 );
+}

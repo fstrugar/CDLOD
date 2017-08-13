@@ -1,0 +1,16 @@
+//////////////////////////////////////////////////////////////////////////
+// Simple C++ wrapper of the iniparser by N. Devillard
+// Author: Filip Strugar, 2009
+//////////////////////////////////////////////////////////////////////////
+
+#include "IniParser.hpp"
+
+IniParser::IniParser( const char * filePath )
+{
+   Open( filePath );
+}
+
+IniParser::~IniParser()
+{
+   Close( );
+}

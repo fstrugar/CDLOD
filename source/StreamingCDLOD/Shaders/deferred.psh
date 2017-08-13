@@ -1,0 +1,98 @@
+//////////////////////////////////////////////////////////////////////
+// Copyright (C) 2009 - Filip Strugar.
+// Distributed under the zlib License (see readme file)
+//////////////////////////////////////////////////////////////////////
+
+#include "lightingShared.sh"
+
+sampler        g_gbufferAlbedoTexture;
+sampler        g_gbufferNormalTexture;
+sampler        g_gbufferDepthTexture;
+
+float4         g_backbufferSize;          // .xy = size.xy, .zw = 1.0 / size.xy
+
+float3         g_cameraPos;
+float4         g_ambientLightColor;
+float4         g_directionalLightDir;
+float4         g_directionalLightColor;
+
+float2         g_projMatrixConsts;        // .x = proj[2][2], .y = proj[2][3]
+float4x4       g_invViewProjMatrix;
+
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Basic debug shaders
+float4 showDepthBuffer( const float2 screenPos : VPOS ) : COLOR
+{
+   float2 screenPosNorm = (screenPos + float2(0.5, 0.5)) * g_backbufferSize.zw;
+
+   float4 depthPixel = tex2D( g_gbufferDepthTexture, screenPosNorm );
+
+   float depth = depthPixel.x;
+
+   float outVal = sin( depth / 100.0 * 3.141592 ) * 0.5 + 0.5;
+
+   return float4( outVal, 0, 0, 1 );
+}
+
+float4 showNormalBuffer( const float2 screenPos : VPOS ) : COLOR
+{
+   float2 screenPosNorm = (screenPos + float2(0.5, 0.5)) * g_backbufferSize.zw;
+
+   float3 normalPixel = tex2D( g_gbufferNormalTexture, screenPosNorm );
+
+   return float4( normalPixel, 1 );
+}
+
+float4 showAlbedoBuffer( const float2 screenPos : VPOS ) : COLOR
+{
+   float2 screenPosNorm = (screenPos + float2(0.5, 0.5)) * g_backbufferSize.zw;
+
+   float4 albedo = tex2D( g_gbufferAlbedoTexture, screenPosNorm );
+
+   return float4( albedo.xyz, 1.0 );
+}
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+float3 reconstructWorldPos( float2 screenPosNorm, float viewspaceDepth )
+{
+   float4 projSpacePos = float4( (screenPosNorm.x * 2.0 - 1.0), 
+                                 (1 - screenPosNorm.y * 2.0),
+                                 g_projMatrixConsts.x,
+                                 1.0 );
+   projSpacePos *= viewspaceDepth;
+   projSpacePos.z += 1 * g_projMatrixConsts.y;
+
+   float4 worldPos = mul( projSpacePos, g_invViewProjMatrix );
+   worldPos.xyz /= worldPos.w;
+
+   return worldPos.xyz;
+}
+
+float4 applyDirectionalLight( const float2 screenPos : VPOS ) : COLOR
+{
+   float2 screenPosNorm = (screenPos + float2(0.5, 0.5)) * g_backbufferSize.zw;
+
+   float4 depthPixel = tex2D( g_gbufferDepthTexture, screenPosNorm );
+   float viewspaceDepth = depthPixel;
+   clip( depthPixel - 0.001 );  // no deferred lighting required here, don't output over the background (skybox and stuff)
+
+   float4 albedo = tex2D( g_gbufferAlbedoTexture, screenPosNorm );
+   float4 normalPixel = tex2D( g_gbufferNormalTexture, screenPosNorm );
+
+   float3 worldNormal = normalize( normalPixel.xyz * float3( 2.0, 2.0, 1.0 ) - float3( 1.0, 1.0, 0.0 ) );
+
+   float3 color = albedo * g_ambientLightColor.xyz;
+
+   float3 worldPos = reconstructWorldPos( screenPosNorm, viewspaceDepth );
+
+   float3 worldEyeDir   = normalize( worldPos - g_cameraPos.xyz );
+   
+   float dirLightStrength = CalculateDirectionalLight( worldNormal, g_directionalLightDir.xyz, worldEyeDir, 64.0, 0.1 );
+
+   color += albedo * dirLightStrength * g_directionalLightColor.xyz;
+
+   return float4( color.xyz, 1.0 );
+}
+
